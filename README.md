@@ -1,4 +1,4 @@
-# CAP-Codex-Manager
+# CPA-Codex-Manager
 
 一款专为 OpenAI 账号池设计的高性能管理面板，集成全自动批量注册、CLIProxyAPI 平台账号池实时监控与智能维护系统。
 本项目核心基于 [cnlimiter/codex-manager](https://github.com/cnlimiter/codex-manager) 以及 [DestinyCycloid/codex-console](https://github.com/DestinyCycloid/codex-console) 开发。
@@ -84,4 +84,4 @@ python webui.py
 因使用本项目产生的任何风险和后果，由使用者自行承担。
 
 ---
-**CAP-Codex-Manager** - 让 CLIProxyAPI 号池管理变得优雅而自动化。
+**CPA-Codex-Manager** - 让 CLIProxyAPI 号池管理变得优雅而自动化。
