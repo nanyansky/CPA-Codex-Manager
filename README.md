@@ -35,8 +35,8 @@
   - **自定义冷却重试**：紧急防御触发后，系统将进入预设的冷却期（如 5 分钟，可配置）后重新开始检测。
   - **异常账号全自动清理**：自动移除检测过程中产生 Network Error 或 API 报错的“僵尸”账号。
 
-## 集成 CLIProxyAPI
-- **CLI Proxy API Management Center**：
+## 集成 CLIProxyAPI 管理
+- **[CLI Proxy API Management Center](https://github.com/router-for-me/CLIProxyAPI)**
 
 
 ## 技术栈
