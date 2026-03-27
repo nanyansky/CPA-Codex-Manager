@@ -7,6 +7,7 @@ import logging
 import time
 import json
 import random
+import uuid
 import urllib.parse
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -94,6 +95,11 @@ def _contains_limit_error(text: str) -> bool:
     keywords = ["usage_limit_reached", "insufficient_quota", "quota_exceeded", "limit_reached", "rate limit"]
     lower_text = text.lower()
     return any(k in lower_text for k in keywords)
+
+
+def _new_batch_id(prefix: str) -> str:
+    """生成批量任务 ID，避免秒级时间戳导致不同任务发生复用/串线。"""
+    return f"{prefix}_{uuid.uuid4().hex}"
 
 # ---------------- Core Logic ----------------
 
@@ -550,7 +556,7 @@ class AutoPatrolManager:
                 self._last_run = datetime.now()
                 
                 # 执行一次扫描
-                batch_id = f"auto_patrol_{int(time.time())}"
+                batch_id = _new_batch_id("auto_patrol")
                 task_manager.init_batch(batch_id, total=0, description="自动巡检")
                 task_manager.update_batch_status(batch_id, mode="auto_patrol", status="running", finished=False)
                 task_manager.add_batch_log(batch_id, f"[自动巡检] 开始新一轮巡检，batch_id={batch_id}")
@@ -600,7 +606,7 @@ class AutoPatrolManager:
                         import random
                         names_to_delete = random.sample(all_names, len(all_names) // 2)
                         if names_to_delete:
-                            action_batch_id = f"auto_action_emergency_{int(time.time())}"
+                            action_batch_id = _new_batch_id("auto_action_emergency")
                             task_manager.init_batch(action_batch_id, total=len(names_to_delete))
                             await perform_action(action_batch_id, ActionRequest(
                                 service_id=self._config.service_id,
@@ -628,7 +634,7 @@ class AutoPatrolManager:
                     
                     # 执行 401 动作
                     if self._config.action_401 == "delete" and names_401:
-                        action_batch_id = f"auto_action_401_{int(time.time())}"
+                        action_batch_id = _new_batch_id("auto_action_401")
                         task_manager.init_batch(action_batch_id, total=len(names_401))
                         await perform_action(action_batch_id, ActionRequest(
                             service_id=self._config.service_id,
@@ -638,7 +644,7 @@ class AutoPatrolManager:
                     
                     # 执行 Quota 动作
                     if self._config.action_quota in ("close", "delete") and names_quota:
-                        action_batch_id = f"auto_action_quota_{int(time.time())}"
+                        action_batch_id = _new_batch_id("auto_action_quota")
                         task_manager.init_batch(action_batch_id, total=len(names_quota))
                         await perform_action(action_batch_id, ActionRequest(
                             service_id=self._config.service_id,
@@ -648,7 +654,7 @@ class AutoPatrolManager:
 
                     # 执行 Error 动作 (新要求：异常账号也清理)
                     if names_errors:
-                        action_batch_id = f"auto_action_error_{int(time.time())}"
+                        action_batch_id = _new_batch_id("auto_action_error")
                         task_manager.init_batch(action_batch_id, total=len(names_errors))
                         await perform_action(action_batch_id, ActionRequest(
                             service_id=self._config.service_id,
@@ -725,7 +731,7 @@ class AutoPatrolManager:
                     email_type = "tempmail"
 
             mode_name = "并行" if self._config.replenish_reg_mode == "parallel" else "串行"
-            batch_id = f"batch_auto_{int(time.time())}"
+            batch_id = _new_batch_id("batch_auto")
             display_name = f"自动补货 ({mode_name})"
             count = self._config.replenish_count
             
@@ -783,9 +789,10 @@ auto_patrol_manager = AutoPatrolManager()
 
 @router.post("/scan")
 async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
-    batch_id = f"cliproxy_scan_{int(time.time())}"
+    batch_id = _new_batch_id("cliproxy_scan")
     task_manager.init_batch(batch_id, total=0)
-    task_manager.update_batch_status(batch_id, mode="cliproxy_scan")
+    # CPA 检测任务只应在 CPA 页面内消费，不应复用首页注册任务监听/文案逻辑
+    task_manager.update_batch_status(batch_id, mode="cliproxy_scan", monitor_visible=False)
     
     background_tasks.add_task(perform_scan, batch_id, request)
     return {"batch_id": batch_id, "message": "扫描任务已启动"}
@@ -795,9 +802,10 @@ async def start_action(request: ActionRequest, background_tasks: BackgroundTasks
     if not request.names:
         raise HTTPException(status_code=400, detail="未指定待处理的账号列表")
     
-    batch_id = f"cliproxy_action_{int(time.time())}"
+    batch_id = _new_batch_id("cliproxy_action")
     task_manager.init_batch(batch_id, total=len(request.names))
-    task_manager.update_batch_status(batch_id, mode="cliproxy_action")
+    # CPA 批量动作同样仅在 CPA 页面展示，避免被首页注册任务监控复用
+    task_manager.update_batch_status(batch_id, mode="cliproxy_action", monitor_visible=False)
     
     background_tasks.add_task(perform_action, batch_id, request)
     return {"batch_id": batch_id, "message": "动作任务已启动"}

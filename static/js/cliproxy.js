@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let searchQuery = '';
     let currentActionNames = []; // 存储正在执行批量动作的账号名
     let latestPreparationMessage = '正在从 CPA 拉取账号列表...';
+    let currentTaskType = null; // scan | action
 
     // ---------------- DOM 元素 ----------------
     const scanForm = document.getElementById('scan-form');
@@ -104,6 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const targetText = data.names ? `选中的 ${data.names.length} 个账号` : '全部账号';
+            currentTaskType = 'scan';
             showProgressModal(`执行 ${mode === 'all' ? '全量检测' : (mode === '401' ? '401 检测' : '额度检测')} (${targetText})...`);
             clearLogs();
             const res = await api.post('/cliproxy/scan', data);
@@ -368,6 +370,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const serviceId = parseInt(document.getElementById('cpa-service').value);
             currentActionNames = names; // 暂存
+            currentTaskType = 'action';
             const res = await api.post('/cliproxy/action', { service_id: serviceId, action: 'delete', names });
             showProgressModal(`执行批量删除操作...`);
             startPolling(res.batch_id, 'action');
@@ -577,6 +580,23 @@ document.addEventListener('DOMContentLoaded', () => {
         progressModal.classList.add('active');
     }
 
+    function buildScanSummary(status) {
+        const summary = status.summary || {};
+        const total = summary.total ?? status.total ?? 0;
+        const invalid401 = summary.invalid_401 ?? 0;
+        const exhausted = summary.invalid_quota ?? 0;
+        const errors = summary.errors ?? 0;
+        const ready = summary.ready ?? Math.max(0, total - invalid401 - exhausted - errors);
+        return `CPA 检测完成：总数 ${total}，就绪 ${ready}，401 ${invalid401}，额度耗尽 ${exhausted}，异常 ${errors}`;
+    }
+
+    function buildActionSummary(status) {
+        const total = status.total || 0;
+        const success = status.success || 0;
+        const failed = status.failed || 0;
+        return `CPA 批量操作完成：总数 ${total}，成功 ${success}，失败 ${failed}`;
+    }
+
     function startPolling(batchId, type) {
         if (pollingInterval) clearInterval(pollingInterval);
         pollingInterval = setInterval(async () => {
@@ -618,6 +638,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         });
                         renderResults();
                         updateStats();
+                        toast.success(buildScanSummary(status), 5000);
                     } else if (type === 'action') {
                         // 核心优化：不再全量刷新列表，而是从本地数据中移除选中的项目
                         if (currentActionNames && currentActionNames.length > 0) {
@@ -625,18 +646,21 @@ document.addEventListener('DOMContentLoaded', () => {
                             currentActionNames = []; // 清空
                             renderResults();
                             updateStats();
-                            toast.success('批量删除完成');
+                            toast.success(buildActionSummary(status), 5000);
                         } else {
                             fetchAccountList(); // 保底方案
+                            toast.success(buildActionSummary(status), 5000);
                         }
                     }
 
                     // 任务结束，如果后台栏开着，也给个提示
                     if (bgState) bgState.textContent = '完成';
+                    currentTaskType = null;
                 }
             } catch (err) {
                 stopPolling();
                 hideProgressModal();
+                currentTaskType = null;
             }
         }, 2000);
     }
