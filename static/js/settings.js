@@ -46,7 +46,9 @@ const elements = {
     // 验证码设置
     emailCodeForm: document.getElementById('email-code-form'),
     // Web UI 访问控制
-    webuiSettingsForm: document.getElementById('webui-settings-form')
+    webuiSettingsForm: document.getElementById('webui-settings-form'),
+    telegramNotifyForm: document.getElementById('telegram-notify-form'),
+    tgNotifyTestBtn: document.getElementById('tg-notify-test-btn')
 };
 
 // 选中的服务 ID
@@ -193,6 +195,12 @@ function initEventListeners() {
     if (elements.webuiSettingsForm) {
         elements.webuiSettingsForm.addEventListener('submit', handleSaveWebuiSettings);
     }
+    if (elements.telegramNotifyForm) {
+        elements.telegramNotifyForm.addEventListener('submit', handleSaveTelegramNotifySettings);
+    }
+    if (elements.tgNotifyTestBtn) {
+        elements.tgNotifyTestBtn.addEventListener('click', handleTestTelegramNotify);
+    }
     if (elements.testCpaServiceBtn) {
         elements.testCpaServiceBtn.addEventListener('click', handleTestCpaService);
     }
@@ -243,6 +251,15 @@ async function loadSettings() {
             }
         }
 
+        // Telegram 通知设置
+        const tgEnabled = document.getElementById('tg-notify-enabled');
+        const tgBotToken = document.getElementById('tg-bot-token');
+        const tgChatId = document.getElementById('tg-chat-id');
+        if (tgEnabled) tgEnabled.checked = data.telegram_notify?.enabled || false;
+        if (tgBotToken) tgBotToken.value = '';
+        if (tgBotToken && data.telegram_notify?.has_bot_token) tgBotToken.placeholder = '已配置，留空保持不变';
+        if (tgChatId) tgChatId.value = data.telegram_notify?.chat_id || '';
+
     } catch (error) {
         console.error('加载设置失败:', error);
         toast.error('加载设置失败');
@@ -265,6 +282,44 @@ async function handleSaveWebuiSettings(e) {
     } catch (error) {
         console.error('保存 Web UI 设置失败:', error);
         toast.error('保存 Web UI 设置失败');
+    }
+}
+
+async function handleTestTelegramNotify() {
+    const btn = elements.tgNotifyTestBtn;
+    if (btn) loading.show(btn, '发送中...');
+
+    try {
+        await api.post('/settings/telegram-notify/test', {
+            message: '[CPA 通知测试] Telegram 通知测试成功。'
+        });
+        toast.success('测试消息已发送');
+    } catch (error) {
+        console.error('发送 Telegram 测试消息失败:', error);
+        toast.error(error?.data?.detail || '发送 Telegram 测试消息失败');
+    } finally {
+        if (btn) loading.hide(btn);
+    }
+}
+
+async function handleSaveTelegramNotifySettings(e) {
+    e.preventDefault();
+
+    const payload = {
+        enabled: document.getElementById('tg-notify-enabled')?.checked || false,
+        bot_token: document.getElementById('tg-bot-token')?.value || null,
+        chat_id: document.getElementById('tg-chat-id')?.value || null,
+    };
+
+    try {
+        await api.post('/settings/telegram-notify', payload);
+        toast.success('Telegram 通知设置已更新');
+        const tgBotToken = document.getElementById('tg-bot-token');
+        if (tgBotToken) tgBotToken.value = '';
+        loadSettings();
+    } catch (error) {
+        console.error('保存 Telegram 通知设置失败:', error);
+        toast.error('保存 Telegram 通知设置失败');
     }
 }
 

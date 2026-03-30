@@ -60,6 +60,18 @@ class WebUISettings(BaseModel):
     access_password: Optional[str] = None
 
 
+class TelegramNotifySettings(BaseModel):
+    """Telegram 通知设置"""
+    enabled: bool = False
+    bot_token: Optional[str] = None
+    chat_id: Optional[str] = None
+
+
+class TelegramTestRequest(BaseModel):
+    """Telegram 测试消息请求"""
+    message: Optional[str] = None
+
+
 class AllSettings(BaseModel):
     """所有设置"""
     proxy: ProxySettings
@@ -101,6 +113,11 @@ async def get_all_settings():
             "port": settings.webui_port,
             "debug": settings.debug,
             "has_access_password": bool(settings.webui_access_password and settings.webui_access_password.get_secret_value()),
+        },
+        "telegram_notify": {
+            "enabled": settings.tg_notify_enabled,
+            "has_bot_token": bool(settings.tg_bot_token and settings.tg_bot_token.get_secret_value()),
+            "chat_id": settings.tg_chat_id,
         },
         "tempmail": {
             "base_url": settings.tempmail_base_url,
@@ -227,6 +244,32 @@ async def update_registration_settings(request: RegistrationSettings):
     )
 
     return {"success": True, "message": "注册设置已更新"}
+
+
+@router.post("/telegram-notify/test")
+async def test_telegram_notify(request: TelegramTestRequest):
+    """发送 Telegram 测试消息"""
+    from .cliproxy import _send_tg_message
+    text = request.message or "[CPA 通知测试] Telegram 通知测试成功。"
+    ok = await _send_tg_message(text)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Telegram 通知发送失败，请检查开关、Bot Token 和 Chat ID")
+    return {"success": True, "message": "测试消息已发送"}
+
+
+@router.post("/telegram-notify")
+async def update_telegram_notify_settings(request: TelegramNotifySettings):
+    """更新 Telegram 通知设置"""
+    update_dict = {
+        "tg_notify_enabled": request.enabled,
+    }
+    if request.bot_token is not None:
+        update_dict["tg_bot_token"] = request.bot_token
+    if request.chat_id is not None:
+        update_dict["tg_chat_id"] = request.chat_id
+
+    update_settings(**update_dict)
+    return {"success": True, "message": "Telegram 通知设置已更新"}
 
 
 @router.post("/webui")

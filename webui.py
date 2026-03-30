@@ -196,37 +196,40 @@ def main():
     import os
 
     parser = argparse.ArgumentParser(description="Codex 自动化注册+CPA 账号管理系统")
-    parser.add_argument("--host", help="监听主机 (也可通过 WEBUI_HOST 环境变量设置)")
-    parser.add_argument("--port", type=int, help="监听端口 (也可通过 WEBUI_PORT 环境变量设置)")
+    parser.add_argument("--host", help="监听主机 (也可通过 WEBUI_HOST / APP_HOST 环境变量设置)")
+    parser.add_argument("--port", type=int, help="监听端口 (也可通过 WEBUI_PORT / APP_PORT 环境变量设置)")
     parser.add_argument("--debug", action="store_true", help="启用调试模式 (也可通过 DEBUG=1 环境变量设置)")
     parser.add_argument("--reload", action="store_true", help="启用热重载")
     parser.add_argument("--log-level", help="日志级别 (也可通过 LOG_LEVEL 环境变量设置)")
-    parser.add_argument("--access-password", help="Web UI 访问密钥 (也可通过 WEBUI_ACCESS_PASSWORD 环境变量设置)")
+    parser.add_argument("--access-password", help="Web UI 访问密钥 (也可通过 WEBUI_ACCESS_PASSWORD / APP_ACCESS_PASSWORD 环境变量设置)")
     args = parser.parse_args()
+
+    # 先完成基础初始化，确保数据库可用
+    setup_application()
 
     # 更新配置
     from src.config.settings import update_settings
 
     updates = {}
-    
+
     # 优先使用命令行参数，如果没有则尝试从环境变量获取
-    host = args.host or os.environ.get("WEBUI_HOST")
+    host = args.host or os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
     if host:
         updates["webui_host"] = host
-        
-    port = args.port or os.environ.get("WEBUI_PORT")
+
+    port = args.port or os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
     if port:
         updates["webui_port"] = int(port)
-        
+
     debug = args.debug or os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
     if debug:
         updates["debug"] = debug
-        
+
     log_level = args.log_level or os.environ.get("LOG_LEVEL")
     if log_level:
         updates["log_level"] = log_level
-        
-    access_password = args.access_password or os.environ.get("WEBUI_ACCESS_PASSWORD")
+
+    access_password = args.access_password or os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
     if access_password:
         updates["webui_access_password"] = access_password
 

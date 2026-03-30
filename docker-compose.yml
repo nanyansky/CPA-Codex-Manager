@@ -1,17 +1,36 @@
 services:
   cpa-codex-manager:
-    image: maoleio/cpa-codex-manager:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cpa-codex-manager:local
     container_name: cpa-codex-manager
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${WEB_BIND_IP:-0.0.0.0}:${APP_PORT:-8000}:8000"
     environment:
+      TZ: Asia/Shanghai
+
+      # 容器内应用监听固定为 8000，宿主机端口映射由 APP_PORT 控制
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      APP_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:-admin123}
+
+      # 保留 WEBUI_* 兼容命名，容器内同样固定监听 8000
       WEBUI_HOST: 0.0.0.0
       WEBUI_PORT: 8000
-      WEBUI_ACCESS_PASSWORD: your_secret_password
-      APP_DATABASE_URL: data/database.db
-      # APP_DATABASE_URL: postgresql://user:password@host:5432/dbname
-      # postgresql
+      WEBUI_ACCESS_PASSWORD: ${APP_ACCESS_PASSWORD:-admin123}
+
+      # 数据库：如果 .env 未显式提供，则默认使用容器内 /app/data 下的 SQLite
+      APP_DATABASE_URL: ${APP_DATABASE_URL:-sqlite:////app/data/database.db}
+      DATABASE_URL: ${APP_DATABASE_URL:-sqlite:////app/data/database.db}
+
+      # Telegram 通知
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_CHAT_ID: ${TG_CHAT_ID:-}
+      # 兼容命名（可选）
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

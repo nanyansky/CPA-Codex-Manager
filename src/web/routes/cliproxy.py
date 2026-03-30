@@ -9,6 +9,7 @@ import json
 import random
 import uuid
 import urllib.parse
+import os
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
 from pydantic import BaseModel
 
 from ...database import crud
+from ...config.settings import get_settings
 from ...database.session import get_db
 from ..task_manager import task_manager
 
@@ -93,6 +95,33 @@ def _extract_chatgpt_account_id(item: dict) -> Optional[str]:
         if val: return val
     return None
 
+
+async def _fetch_current_account_count(service_id: int, target_type: str = "codex") -> Optional[int]:
+    """从 CPA 管理接口获取当前账号数。手动补货场景下用于填充通知中的当前有效账号数。"""
+    try:
+        with get_db() as db:
+            service = crud.get_cpa_service_by_id(db, service_id)
+            if not service:
+                return None
+            base_mgmt_url = _normalize_mgmt_url(service.api_url)
+            api_token = service.api_token
+
+        url = f"{base_mgmt_url}/auth-files"
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=_get_mgmt_headers(api_token)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"获取当前账号数失败: HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+                files = data.get("files", []) or []
+                candidates = [f for f in files if f.get("type") == target_type]
+                return len(candidates)
+    except Exception as e:
+        logger.warning(f"获取当前账号数失败: {e}")
+        return None
+
+
 def _contains_limit_error(text: str) -> bool:
     keywords = ["usage_limit_reached", "insufficient_quota", "quota_exceeded", "limit_reached", "rate limit"]
     lower_text = text.lower()
@@ -109,6 +138,100 @@ def _mark_batch_failed(batch_id: str, reason: str, log_message: Optional[str] = 
     if log_message:
         task_manager.add_batch_log(batch_id, log_message)
     task_manager.update_batch_status(batch_id, finished=True, status="failed", error=reason)
+
+# ---------------- Telegram Notify ----------------
+
+def _get_tg_notifier_config() -> tuple[bool, Optional[str], Optional[str]]:
+    try:
+        settings = get_settings()
+        enabled = bool(getattr(settings, "tg_notify_enabled", False))
+        bot_token = None
+        if getattr(settings, "tg_bot_token", None):
+            bot_token = settings.tg_bot_token.get_secret_value()
+        chat_id = getattr(settings, "tg_chat_id", "") or None
+        if enabled and bot_token and chat_id:
+            return True, bot_token, chat_id
+    except Exception as e:
+        logger.warning(f"读取 Telegram 通知数据库配置失败: {e}")
+
+    bot_token = os.environ.get("TG_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TG_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+    enabled = bool(bot_token and chat_id)
+    return enabled, bot_token, chat_id
+
+
+async def _send_tg_message(text: str) -> bool:
+    enabled, bot_token, chat_id = _get_tg_notifier_config()
+    if not enabled or not bot_token or not chat_id:
+        return False
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logger.warning(f"Telegram 通知发送失败: {e}")
+        return False
+
+
+async def _watch_replenish_batch_and_notify(batch_id: str, service_id: int, snapshot: Optional[Dict[str, Any]] = None):
+    """等待自动补货批次结束后发送结果通知"""
+    max_wait_seconds = 60 * 60 * 2  # 最多等待 2 小时
+    waited = 0
+    interval = 5
+    snapshot = snapshot or {}
+
+    while waited < max_wait_seconds:
+        status = task_manager.get_batch_status(batch_id) or {}
+        if status.get("finished"):
+            final_status = status.get("status", "unknown")
+            success = int(status.get("success", 0) or 0)
+            failed = int(status.get("failed", 0) or 0)
+            completed = int(status.get("completed", success + failed) or 0)
+            total = int(status.get("total", completed) or 0)
+            skipped = max(total - success - failed, 0)
+            latest_ready_count = await _fetch_current_account_count(service_id)
+            ready_count_display = latest_ready_count if latest_ready_count is not None else snapshot.get('ready_count', '-')
+
+            status_emoji = "✅" if final_status == "completed" else ("⚠️" if final_status in ("cancelled", "timeout") else "❌")
+            now_label = datetime.now().strftime("%m-%d %H:%M")
+            threshold = snapshot.get('replenish_threshold', '-')
+            replenish_count = snapshot.get('replenish_count', total or '-')
+            replenish_method = snapshot.get('replenish_method', '-')
+            await _send_tg_message(
+                f"""🦞 CPA自动补货 {status_emoji}
+⏰ {now_label}
+📦 当前有效：{ready_count_display}
+🎯 阈值：{threshold}
+🆕 补货：{replenish_count} 个
+🛠️ 方式：{replenish_method}
+📊 状态：{final_status}
+📈 结果：成功 {success} / 失败 {failed} / 跳过 {skipped} / 总数 {total}"""
+            )
+            return
+
+        await asyncio.sleep(interval)
+        waited += interval
+
+    now_label = datetime.now().strftime("%m-%d %H:%M")
+    await _send_tg_message(
+        f"""🦞 CPA自动补货 ⚠️
+⏰ {now_label}
+📦 当前有效：{snapshot.get('ready_count', '-')}
+🎯 阈值：{snapshot.get('replenish_threshold', '-')}
+🆕 补货：{snapshot.get('replenish_count', '-')} 个
+🛠️ 方式：{snapshot.get('replenish_method', '-')}
+📊 状态：timeout
+📈 结果：成功 0 / 失败 0 / 跳过 0 / 总数 {snapshot.get('replenish_count', '-')}"""
+    )
 
 # ---------------- Core Logic ----------------
 
@@ -817,9 +940,24 @@ class AutoPatrolManager:
                         
                         count = config.replenish_count
                         threads = config.replenish_concurrency if config.replenish_reg_mode == "parallel" else 1
+                        mode_name = "parallel" if config.replenish_reg_mode == "parallel" else "pipeline"
+                        replenish_method = f"{service_name} / {mode_name}"
                         replenish_log = f" | 触发自动补货: {threads}个线程执行[{service_name}] 补货 {count} 个账号"
                         replenish_info = {"method": service_name, "count": count, "threads": threads}
-                        asyncio.create_task(self._trigger_replenish(service_id))
+                        asyncio.create_task(_send_tg_message(
+                            f"""[CPA 自动补货触发]
+服务: {self._get_service_name(service_id)}
+当前有效: {ready_count}/{total_scanned}
+阈值: {config.replenish_threshold}
+补货数量: {count}
+方式: {replenish_method}"""
+                        ))
+                        asyncio.create_task(self._trigger_replenish(service_id, {
+                            "ready_count": ready_count,
+                            "replenish_threshold": config.replenish_threshold,
+                            "replenish_count": count,
+                            "replenish_method": replenish_method,
+                        }))
 
                     # 记录到持久化历史
                     cleared_count = (len(names_401) if config.action_401 == 'delete' else 0) + \
@@ -854,7 +992,7 @@ class AutoPatrolManager:
                 self._status_map[service_id] = "error"
                 await asyncio.sleep(60)
 
-    async def _trigger_replenish(self, service_id: int):
+    async def _trigger_replenish(self, service_id: int, notify_snapshot: Optional[Dict[str, Any]] = None):
         """执行自动补货逻辑"""
         try:
             from .registration import run_batch_registration, BatchRegistrationRequest
@@ -897,6 +1035,27 @@ class AutoPatrolManager:
             task_manager.add_batch_log(batch_id, f"[阶段] 触发 {display_name}: 数量={count}, Concurrency={config.replenish_concurrency}")
             
             logger.info(f"开启自动补货任务 {batch_id}: {display_name}")
+            asyncio.create_task(_send_tg_message(
+                f"""[CPA 自动补货开始]
+服务: {self._get_service_name(service_id)}
+任务: {display_name}
+批次ID: {batch_id}
+补货数量: {count}
+并发: {config.replenish_concurrency}"""
+            ))
+            if notify_snapshot is None:
+                current_count = await _fetch_current_account_count(service_id, config.target_type)
+                notify_snapshot = {
+                    "ready_count": current_count if current_count is not None else "-",
+                    "replenish_threshold": config.replenish_threshold,
+                    "replenish_count": count,
+                    "replenish_method": f"{email_type} / {mode_name}",
+                }
+            elif notify_snapshot.get("ready_count") in (None, "-", ""):
+                current_count = await _fetch_current_account_count(service_id, config.target_type)
+                if current_count is not None:
+                    notify_snapshot["ready_count"] = current_count
+            asyncio.create_task(_watch_replenish_batch_and_notify(batch_id, service_id, notify_snapshot))
             
             # 直接复用 registration.py 中的执行逻辑
             if config.replenish_reg_mode == "parallel":
@@ -929,6 +1088,11 @@ class AutoPatrolManager:
                 ))
         except Exception as e:
             logger.error(f"自动补货触发失败: {e}")
+            asyncio.create_task(_send_tg_message(
+                f"""[CPA 自动补货失败]
+服务ID: {service_id}
+错误: {e}"""
+            ))
 
 auto_patrol_manager = AutoPatrolManager()
 

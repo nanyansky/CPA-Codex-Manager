@@ -26,6 +26,7 @@ class SettingCategory(str, Enum):
     CUSTOM_DOMAIN = "moe_mail"
     SECURITY = "security"
     CPA = "cpa"
+    NOTIFY = "notify"
 
 
 @dataclass
@@ -329,6 +330,27 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         is_secret=True
     ),
 
+    # Telegram 通知配置
+    "tg_notify_enabled": SettingDefinition(
+        db_key="notify.telegram.enabled",
+        default_value=False,
+        category=SettingCategory.NOTIFY,
+        description="是否启用 Telegram 通知"
+    ),
+    "tg_bot_token": SettingDefinition(
+        db_key="notify.telegram.bot_token",
+        default_value="",
+        category=SettingCategory.NOTIFY,
+        description="Telegram Bot Token",
+        is_secret=True
+    ),
+    "tg_chat_id": SettingDefinition(
+        db_key="notify.telegram.chat_id",
+        default_value="",
+        category=SettingCategory.NOTIFY,
+        description="Telegram Chat ID"
+    ),
+
     # CPA 上传配置
     "cpa_enabled": SettingDefinition(
         db_key="cpa.enabled",
@@ -390,6 +412,7 @@ SETTING_TYPES: Dict[str, Type] = {
     "cpa_enabled": bool,
     "email_code_timeout": int,
     "email_code_poll_interval": int,
+    "tg_notify_enabled": bool,
 }
 
 # 需要作为 SecretStr 处理的字段
@@ -398,212 +421,110 @@ SECRET_FIELDS = {name for name, defn in SETTING_DEFINITIONS.items() if defn.is_s
 
 def _convert_value(attr_name: str, value: str) -> Any:
     """将数据库字符串值转换为正确的类型"""
-    if attr_name in SECRET_FIELDS:
-        return SecretStr(value) if value else SecretStr("")
+    if value is None:
+        return None
 
     target_type = SETTING_TYPES.get(attr_name, str)
 
     if target_type == bool:
-        if isinstance(value, bool):
-            return value
-        return str(value).lower() in ("true", "1", "yes", "on")
+        return value.lower() in ("true", "1", "yes", "on")
     elif target_type == int:
-        if isinstance(value, int):
-            return value
-        return int(value) if value else 0
-    elif target_type == dict:
-        if isinstance(value, dict):
-            return value
-        if not value:
-            return {}
-        import json
-        import ast
         try:
-            return json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            try:
-                return ast.literal_eval(value)
-            except Exception:
-                return {}
-    elif target_type == list:
-        if isinstance(value, list):
-            return value
-        if not value:
-            return []
-        import json
-        import ast
+            return int(value)
+        except (ValueError, TypeError):
+            return 0
+    elif target_type == float:
         try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+    elif target_type in (dict, list):
+        try:
+            import json
             return json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            try:
-                return ast.literal_eval(value)
-            except Exception:
-                return []
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return {} if target_type == dict else []
     else:
         return value
 
 
-def _normalize_database_url(url: str) -> str:
-    if url.startswith("postgres://"):
-        return "postgresql+psycopg://" + url[len("postgres://"):]
-    if url.startswith("postgresql://"):
-        return "postgresql+psycopg://" + url[len("postgresql://"):]
-    return url
-
-
-def _value_to_string(value: Any) -> str:
-    """将值转换为数据库存储的字符串"""
-    if isinstance(value, SecretStr):
+def _serialize_value(value: Any) -> str:
+    """将值序列化为字符串以便存储到数据库"""
+    if value is None:
+        return ""
+    elif isinstance(value, SecretStr):
         return value.get_secret_value()
     elif isinstance(value, bool):
         return "true" if value else "false"
     elif isinstance(value, (dict, list)):
         import json
-        return json.dumps(value)
-    elif value is None:
-        return ""
+        return json.dumps(value, ensure_ascii=False)
     else:
         return str(value)
 
 
-def init_default_settings() -> None:
-    """
-    初始化数据库中的默认设置
-    如果设置项不存在，则创建并设置默认值
-    """
-    try:
-        from ..database.session import get_db
-        from ..database.crud import get_setting, set_setting
-
-        with get_db() as db:
-            for attr_name, defn in SETTING_DEFINITIONS.items():
-                existing = get_setting(db, defn.db_key)
-                if not existing:
-                    default_value = defn.default_value
-                    if attr_name == "database_url":
-                        env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
-                        if env_url:
-                            default_value = _normalize_database_url(env_url)
-                    default_value = _value_to_string(default_value)
-                    set_setting(
-                        db,
-                        defn.db_key,
-                        default_value,
-                        category=defn.category.value,
-                        description=defn.description
-                    )
-                    print(f"[Settings] 初始化默认设置: {defn.db_key} = {default_value if not defn.is_secret else '***'}")
-    except Exception as e:
-        if "未初始化" not in str(e):
-            print(f"[Settings] 初始化默认设置失败: {e}")
-
-
 def _load_settings_from_db() -> Dict[str, Any]:
     """从数据库加载所有设置"""
-    try:
-        from ..database.session import get_db
-        from ..database.crud import get_setting
+    from ..database.session import get_db
+    from ..database import crud
 
-        settings_dict = {}
+    # 先使用默认值初始化
+    settings_dict = {
+        attr_name: definition.default_value
+        for attr_name, definition in SETTING_DEFINITIONS.items()
+    }
+
+    try:
         with get_db() as db:
-            for attr_name, defn in SETTING_DEFINITIONS.items():
-                db_setting = get_setting(db, defn.db_key)
-                if db_setting:
-                    settings_dict[attr_name] = _convert_value(attr_name, db_setting.value)
-                else:
-                    # 数据库中没有此设置，使用默认值
-                    settings_dict[attr_name] = _convert_value(attr_name, _value_to_string(defn.default_value))
-            env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
-            if env_url:
-                settings_dict["database_url"] = _normalize_database_url(env_url)
-            env_host = os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
-            if env_host:
-                settings_dict["webui_host"] = env_host
-            env_port = os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
-            if env_port:
-                try:
-                    settings_dict["webui_port"] = int(env_port)
-                except ValueError:
-                    pass
-            env_password = os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
-            if env_password:
-                settings_dict["webui_access_password"] = env_password
-        return settings_dict
+            for attr_name, definition in SETTING_DEFINITIONS.items():
+                db_key = definition.db_key
+                db_setting = crud.get_setting(db, db_key)
+                if db_setting is not None:
+                    raw_value = db_setting.value
+                    converted_value = _convert_value(attr_name, raw_value)
+                    settings_dict[attr_name] = converted_value
     except Exception as e:
-        if "未初始化" not in str(e):
-            print(f"[Settings] 从数据库加载设置失败: {e}，使用默认值")
-        settings_dict = {name: defn.default_value for name, defn in SETTING_DEFINITIONS.items()}
-        env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
-        if env_url:
-            settings_dict["database_url"] = _normalize_database_url(env_url)
-        env_host = os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
-        if env_host:
-            settings_dict["webui_host"] = env_host
-        env_port = os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
-        if env_port:
-            try:
-                settings_dict["webui_port"] = int(env_port)
-            except ValueError:
-                pass
-        env_password = os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
-        if env_password:
-            settings_dict["webui_access_password"] = env_password
-        return settings_dict
+        print(f"Warning: Failed to load settings from database: {e}")
+        # 如果数据库读取失败，使用默认值
+
+    return settings_dict
 
 
-def _apply_runtime_env_overrides(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """确保运行时环境变量对关键启动配置保持最高优先级。"""
-    updated = dict(settings_dict)
-
-    env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
-    if env_url:
-        updated["database_url"] = _normalize_database_url(env_url)
-
-    env_host = os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
-    if env_host:
-        updated["webui_host"] = env_host
-
-    env_port = os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
-    if env_port:
-        try:
-            updated["webui_port"] = int(env_port)
-        except ValueError:
-            pass
-
-    env_password = os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
-    if env_password:
-        updated["webui_access_password"] = env_password
-
-    return updated
-
-
-def _save_settings_to_db(**kwargs) -> None:
+def _save_settings_to_db(**kwargs):
     """保存设置到数据库"""
-    try:
-        from ..database.session import get_db
-        from ..database.crud import set_setting
+    from ..database.session import get_db
+    from ..database import crud
 
+    try:
         with get_db() as db:
             for attr_name, value in kwargs.items():
-                if attr_name in SETTING_DEFINITIONS:
-                    defn = SETTING_DEFINITIONS[attr_name]
-                    str_value = _value_to_string(value)
-                    set_setting(
-                        db,
-                        defn.db_key,
-                        str_value,
-                        category=defn.category.value,
-                        description=defn.description
-                    )
+                if attr_name in DB_SETTING_KEYS:
+                    db_key = DB_SETTING_KEYS[attr_name]
+                    serialized_value = _serialize_value(value)
+                    crud.set_setting(db, db_key, serialized_value)
     except Exception as e:
-        if "未初始化" not in str(e):
-            print(f"[Settings] 保存设置到数据库失败: {e}")
+        raise RuntimeError(f"Failed to save settings to database: {e}")
+
+
+def init_default_settings():
+    """初始化默认设置到数据库（如果不存在）"""
+    from ..database.session import get_db
+    from ..database import crud
+
+    try:
+        with get_db() as db:
+            for attr_name, definition in SETTING_DEFINITIONS.items():
+                db_key = definition.db_key
+                existing = crud.get_setting(db, db_key)
+                if existing is None:
+                    default_value = _serialize_value(definition.default_value)
+                    crud.set_setting(db, db_key, default_value, category=definition.category.value, description=definition.description)
+    except Exception as e:
+        print(f"Warning: Failed to initialize default settings: {e}")
 
 
 class Settings(BaseModel):
-    """
-    应用配置 - 完全基于数据库存储
-    """
+    """应用配置模型 - 完全基于数据库"""
 
     # 应用信息
     app_name: str = APP_NAME
@@ -612,22 +533,6 @@ class Settings(BaseModel):
 
     # 数据库配置
     database_url: str = "data/database.db"
-
-    @field_validator('database_url', mode='before')
-    @classmethod
-    def validate_database_url(cls, v):
-        if isinstance(v, str):
-            if v.startswith(("postgres://", "postgresql://")):
-                return _normalize_database_url(v)
-            if v.startswith(("postgresql+psycopg://", "postgresql+psycopg2://")):
-                return v
-        if isinstance(v, str) and v.startswith("sqlite:///"):
-            return v
-        if isinstance(v, str) and not v.startswith(("sqlite:///", "postgresql://", "postgresql+psycopg://", "postgresql+psycopg2://", "mysql://")):
-            # 如果是文件路径，转换为 SQLite URL
-            if os.path.isabs(v) or ":/" not in v:
-                return f"sqlite:///{v}"
-        return v
 
     # Web UI 配置
     webui_host: str = "0.0.0.0"
@@ -640,7 +545,7 @@ class Settings(BaseModel):
     log_file: str = "logs/app.log"
     log_retention_days: int = 30
 
-    # OpenAI 配置
+    # OpenAI OAuth 配置
     openai_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     openai_auth_url: str = "https://auth.openai.com/oauth/authorize"
     openai_token_url: str = "https://auth.openai.com/oauth/token"
@@ -707,6 +612,11 @@ class Settings(BaseModel):
     tm_api_url: str = ""
     tm_api_key: Optional[SecretStr] = None
 
+    # Telegram 通知配置
+    tg_notify_enabled: bool = False
+    tg_bot_token: Optional[SecretStr] = None
+    tg_chat_id: str = ""
+
     # CPA 上传配置
     cpa_enabled: bool = False
     cpa_api_url: str = ""
@@ -718,6 +628,18 @@ class Settings(BaseModel):
 
 # 全局配置实例
 _settings: Optional[Settings] = None
+
+
+def _apply_runtime_env_overrides(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """仅对运行时通知通道保留环境变量兜底，不写回数据库。"""
+    merged = dict(settings_dict)
+
+    if not merged.get("tg_bot_token"):
+        merged["tg_bot_token"] = os.environ.get("TG_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+    if not merged.get("tg_chat_id"):
+        merged["tg_chat_id"] = os.environ.get("TG_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID") or ""
+
+    return merged
 
 
 def get_settings() -> Settings:

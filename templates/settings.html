@@ -358,6 +358,34 @@
                                 </form>
                             </div>
                         </div>
+                        <div class="card" style="margin-top: 24px;">
+                            <div class="card-header">
+                                <h3>Telegram 通知</h3>
+                            </div>
+                            <div class="card-body">
+                                <form id="telegram-notify-form">
+                                    <div class="form-group">
+                                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                            <input type="checkbox" id="tg-notify-enabled">
+                                            <span>启用 Telegram 通知</span>
+                                        </label>
+                                        <small style="display: block; margin-top: 8px; color: var(--text-muted);">用于自动巡检触发补货、补货失败等通知。</small>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="tg-bot-token">Bot Token</label>
+                                        <input type="password" id="tg-bot-token" placeholder="留空则保持不变">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="tg-chat-id">Chat ID</label>
+                                        <input type="text" id="tg-chat-id" placeholder="例如: 123456789 或 -100xxxxxxxxxx">
+                                    </div>
+                                    <div class="form-actions" style="margin-top: 24px; border: none; padding: 0; display: flex; gap: 12px;">
+                                        <button type="submit" class="btn btn-primary">保存 Telegram 通知</button>
+                                        <button type="button" class="btn btn-secondary" id="tg-notify-test-btn">发送测试消息</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- 数据管理 -->
