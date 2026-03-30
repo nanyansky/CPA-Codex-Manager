@@ -1,6 +1,5 @@
 """
 HTTP 客户端封装
-基于 curl_cffi 的 HTTP 请求封装，支持代理和错误处理
 """
 
 import time
